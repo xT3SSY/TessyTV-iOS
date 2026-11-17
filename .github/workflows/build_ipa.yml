@@ -30,6 +30,7 @@ jobs:
             BUILD_DIR=build clean build
 
           rm -rf build/Release-iphoneos/TessyTV.app/_CodeSignature
+          plutil -convert xml1 build/Release-iphoneos/TessyTV.app/Info.plist
           mkdir -p Payload
           cp -r build/Release-iphoneos/TessyTV.app Payload/
           zip -qry TessyTV.ipa Payload
