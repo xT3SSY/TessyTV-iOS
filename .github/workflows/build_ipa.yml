@@ -1,0 +1,39 @@
+﻿name: Build TessyTV iOS IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode Project
+        run: xcodegen generate
+
+      - name: Build Unsigned IPA
+        run: |
+          xcodebuild -project TessyTV.xcodeproj \
+            -scheme TessyTV \
+            -configuration Release \
+            -sdk iphoneos \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            BUILD_DIR=build clean build
+
+          mkdir -p Payload
+          cp -r build/Release-iphoneos/TessyTV.app Payload/
+          zip -r TessyTV.ipa Payload
+
+      - name: Upload TessyTV.ipa
+        uses: actions/upload-artifact@v4
+        with:
+          name: TessyTV-iOS-IPA
+          path: TessyTV.ipa
