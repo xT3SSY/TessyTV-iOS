@@ -23,9 +23,10 @@ jobs:
             -scheme TessyTV \
             -configuration Release \
             -sdk iphoneos \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
+            -destination 'generic/platform=iOS' \
             CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
             BUILD_DIR=build clean build
 
           mkdir -p Payload
@@ -37,4 +38,3 @@ jobs:
         with:
           name: TessyTV-iOS-IPA
           path: TessyTV.ipa
-
