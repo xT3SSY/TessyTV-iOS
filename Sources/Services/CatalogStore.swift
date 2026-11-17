@@ -64,7 +64,9 @@ final class CatalogStore: ObservableObject {
         statusText = "Aggiorno lista canali..."
 
         do {
-            let (data, _) = try await URLSession.shared.data(from: url)
+            var req = URLRequest(url: url)
+            req.setValue("VLC/3.0.20 LibVLC/3.0.20", forHTTPHeaderField: "User-Agent")
+            let (data, _) = try await URLSession.shared.data(for: req)
             if let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) {
                 let inserted = await Task.detached(priority: .userInitiated) { [dbPath] in
                     Self.parseAndInsertM3U(content: text, dbPath: dbPath)
@@ -94,21 +96,31 @@ final class CatalogStore: ObservableObject {
         statusText = "Lista rimossa."
     }
 
+    func onCategoryChanged() {
+        refreshCountAndGroups()
+        if !searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            performSearch()
+        }
+    }
+
     func performSearch() {
         let q = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         let cat = selectedCategory
+        if q.isEmpty {
+            items = []
+            refreshCountAndGroups()
+            return
+        }
         isSearching = true
 
         Task {
             let results = await Task.detached(priority: .userInitiated) { [dbPath] in
-                Self.queryChannels(dbPath: dbPath, category: cat, query: q, limit: q.isEmpty ? 300 : 1500)
+                Self.queryChannels(dbPath: dbPath, category: cat, query: q, limit: 1500)
             }.value
 
             self.items = results
             self.isSearching = false
-            self.statusText = q.isEmpty
-                ? "Mostrati \(totalCount) elementi (\(cat.rawValue))."
-                : "Trovati \(results.count) risultati per '\(q)'."
+            self.statusText = "Trovati \(results.count) risultati in \(cat.rawValue) per '\(q)'."
         }
     }
 
@@ -117,18 +129,31 @@ final class CatalogStore: ObservableObject {
         return Self.queryChannelsByGroup(dbPath: dbPath, group: groupName, category: cat)
     }
 
-    private func refreshCountAndGroups() {
+    func refreshCountAndGroups() {
+        let cat = selectedCategory
+        var countSql = "SELECT COUNT(*) FROM channels"
+        if cat != .all {
+            countSql += " WHERE kind = '\(cat.rawValue)'"
+        }
+        countSql += ";"
+
         var countStmt: OpaquePointer?
-        if sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM channels;", -1, &countStmt, nil) == SQLITE_OK {
+        if sqlite3_prepare_v2(db, countSql, -1, &countStmt, nil) == SQLITE_OK {
             if sqlite3_step(countStmt) == SQLITE_ROW {
                 totalCount = Int(sqlite3_column_int(countStmt, 0))
             }
         }
         sqlite3_finalize(countStmt)
 
+        var grpSql = "SELECT DISTINCT grp FROM channels"
+        if cat != .all {
+            grpSql += " WHERE kind = '\(cat.rawValue)'"
+        }
+        grpSql += " ORDER BY grp COLLATE NOCASE ASC;"
+
         var grpList: [String] = []
         var grpStmt: OpaquePointer?
-        if sqlite3_prepare_v2(db, "SELECT DISTINCT grp FROM channels ORDER BY grp COLLATE NOCASE ASC;", -1, &grpStmt, nil) == SQLITE_OK {
+        if sqlite3_prepare_v2(db, grpSql, -1, &grpStmt, nil) == SQLITE_OK {
             while sqlite3_step(grpStmt) == SQLITE_ROW {
                 if let cStr = sqlite3_column_text(grpStmt, 0) {
                     grpList.append(String(cString: cStr))
@@ -137,7 +162,7 @@ final class CatalogStore: ObservableObject {
         }
         sqlite3_finalize(grpStmt)
         groups = grpList
-        statusText = "Mostrati \(totalCount) elementi (\(selectedCategory.rawValue))."
+        statusText = "Mostrati \(totalCount) elementi (\(cat.rawValue))."
     }
 
     nonisolated private static func parseAndInsertM3U(content: String, dbPath: String) -> Int {
@@ -171,9 +196,9 @@ final class CatalogStore: ObservableObject {
                 let lowUrl = trimmed.lowercased()
                 let lowGrp = currentGroup.lowercased()
                 let kind: String
-                if lowUrl.contains("/series/") || lowGrp.contains("serie") {
+                if lowUrl.contains("/series/") || lowGrp.contains("serie") || lowGrp.contains("tv show") || lowGrp.contains("stagion") {
                     kind = MediaKind.series.rawValue
-                } else if lowUrl.contains("/movie/") || lowGrp.contains("vod") || lowGrp.contains("film") {
+                } else if lowUrl.contains("/movie/") || lowUrl.hasSuffix(".mp4") || lowUrl.hasSuffix(".mkv") || lowUrl.hasSuffix(".avi") || lowGrp.contains("vod") || lowGrp.contains("film") || lowGrp.contains("cinema") || lowGrp.contains("movie") {
                     kind = MediaKind.vod.rawValue
                 } else {
                     kind = MediaKind.live.rawValue
