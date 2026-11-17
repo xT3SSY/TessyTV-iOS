@@ -29,9 +29,10 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             BUILD_DIR=build clean build
 
+          rm -rf build/Release-iphoneos/TessyTV.app/_CodeSignature
           mkdir -p Payload
           cp -r build/Release-iphoneos/TessyTV.app Payload/
-          zip -r TessyTV.ipa Payload
+          zip -qry TessyTV.ipa Payload
 
       - name: Upload TessyTV.ipa
         uses: actions/upload-artifact@v4
