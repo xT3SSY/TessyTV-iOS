@@ -6,6 +6,7 @@ import SwiftUI
 final class CatalogStore: ObservableObject {
     @Published var groups: [String] = []
     @Published var items: [MediaItem] = []
+    @Published var recentItems: [MediaItem] = []
     @Published var selectedCategory: MediaKind = .all
     @Published var searchQuery: String = ""
     @Published var isSearching: Bool = false
@@ -22,7 +23,9 @@ final class CatalogStore: ObservableObject {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         self.dbPath = docs.appendingPathComponent("tessytv_catalog.sqlite").path
         openDatabase()
+        migrateLegacyKindsIfNeeded()
         refreshCountAndGroups()
+        loadRecentPreview()
         scheduleDailySyncIfNeeded()
     }
 
@@ -34,13 +37,30 @@ final class CatalogStore: ObservableObject {
                 grp TEXT NOT NULL,
                 title TEXT NOT NULL,
                 url TEXT NOT NULL,
-                kind TEXT NOT NULL
+                kind TEXT NOT NULL,
+                manual_lock INTEGER DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS idx_channels_title ON channels(title);
             CREATE INDEX IF NOT EXISTS idx_channels_grp ON channels(grp);
             CREATE INDEX IF NOT EXISTS idx_channels_kind ON channels(kind);
             """
             sqlite3_exec(db, createSQL, nil, nil, nil)
+            sqlite3_exec(db, "ALTER TABLE channels ADD COLUMN manual_lock INTEGER DEFAULT 0;", nil, nil, nil)
+        }
+    }
+
+    private func migrateLegacyKindsIfNeeded() {
+        sqlite3_exec(db, "UPDATE channels SET kind = 'Channels' WHERE kind = 'Live';", nil, nil, nil)
+        sqlite3_exec(db, "UPDATE channels SET kind = 'Movies' WHERE kind = 'Film';", nil, nil, nil)
+        sqlite3_exec(db, "UPDATE channels SET kind = 'Series' WHERE kind = 'Serie';", nil, nil, nil)
+    }
+
+    func loadRecentPreview() {
+        Task {
+            let preview = await Task.detached(priority: .utility) { [dbPath] in
+                Self.queryChannels(dbPath: dbPath, category: .live, query: "", limit: 25)
+            }.value
+            self.recentItems = preview
         }
     }
 
@@ -77,6 +97,7 @@ final class CatalogStore: ObservableObject {
                 UserDefaults.standard.set(formatter.string(from: Date()), forKey: lastSyncKey)
 
                 refreshCountAndGroups()
+                loadRecentPreview()
                 statusText = "Lista aggiornata (\(inserted) elementi)"
             }
         } catch {
@@ -87,11 +108,46 @@ final class CatalogStore: ObservableObject {
         isSyncing = false
     }
 
+    func moveItem(_ item: MediaItem, to targetKind: MediaKind) {
+        let sql = "UPDATE channels SET kind = '\(targetKind.rawValue)', manual_lock = 1 WHERE id = \(item.id);"
+        sqlite3_exec(db, sql, nil, nil, nil)
+        refreshCountAndGroups()
+        if !searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            performSearch()
+        }
+        statusText = "Spostato '\(item.title)' in \(targetKind.rawValue)."
+    }
+
+    func moveGroup(_ groupName: String, to targetKind: MediaKind) {
+        let safeGrp = groupName.replacingOccurrences(of: "'", with: "''")
+        let sql = "UPDATE channels SET kind = '\(targetKind.rawValue)', manual_lock = 1 WHERE grp = '\(safeGrp)';"
+        sqlite3_exec(db, sql, nil, nil, nil)
+        refreshCountAndGroups()
+        statusText = "Spostata categoria '\(groupName)' in \(targetKind.rawValue)."
+    }
+
+    func deleteItem(_ item: MediaItem) {
+        sqlite3_exec(db, "DELETE FROM channels WHERE id = \(item.id);", nil, nil, nil)
+        refreshCountAndGroups()
+        if !searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            performSearch()
+        }
+        statusText = "Rimosso '\(item.title)'."
+    }
+
+    func deleteGroup(_ groupName: String) {
+        let safeGrp = groupName.replacingOccurrences(of: "'", with: "''")
+        sqlite3_exec(db, "DELETE FROM channels WHERE grp = '\(safeGrp)';", nil, nil, nil)
+        refreshCountAndGroups()
+        statusText = "Rimossa categoria '\(groupName)'."
+    }
+
     func clearCatalog() {
         sqlite3_exec(db, "DELETE FROM channels;", nil, nil, nil)
         UserDefaults.standard.removeObject(forKey: lastSyncKey)
         groups = []
         items = []
+        recentItems = []
         totalCount = 0
         statusText = "Lista rimossa."
     }
@@ -170,11 +226,20 @@ final class CatalogStore: ObservableObject {
         guard sqlite3_open(dbPath, &localDB) == SQLITE_OK else { return 0 }
         defer { sqlite3_close(localDB) }
 
+        let seriesGroupRegex = try! NSRegularExpression(
+            pattern: #"^(\[SERIE\]|serie\b|series\b|sitcom\b|telenovel|k-?drama|drama\s+corean)"#,
+            options: [.caseInsensitive]
+        )
+        let episodeTitleRegex = try! NSRegularExpression(
+            pattern: #"(?:\bS\d{1,2}\s*E\d{1,3}\b|\b\d{1,2}x\d{1,3}\b|\bStagione\s*\d{1,2}\b)"#,
+            options: [.caseInsensitive]
+        )
+
         sqlite3_exec(localDB, "BEGIN TRANSACTION;", nil, nil, nil)
         sqlite3_exec(localDB, "DELETE FROM channels;", nil, nil, nil)
 
         var insertStmt: OpaquePointer?
-        sqlite3_prepare_v2(localDB, "INSERT INTO channels (grp, title, url, kind) VALUES (?, ?, ?, ?);", -1, &insertStmt, nil)
+        sqlite3_prepare_v2(localDB, "INSERT INTO channels (grp, title, url, kind, manual_lock) VALUES (?, ?, ?, ?, 0);", -1, &insertStmt, nil)
 
         var currentGroup = "Generale"
         var currentTitle = ""
@@ -186,19 +251,38 @@ final class CatalogStore: ObservableObject {
                 if let grpRange = trimmed.range(of: "group-title=\"") {
                     let rest = trimmed[grpRange.upperBound...]
                     if let endQuote = rest.firstIndex(of: "\"") {
-                        currentGroup = String(rest[..<endQuote])
+                        let parsedGrp = String(rest[..<endQuote]).trimmingCharacters(in: .whitespacesAndNewlines)
+                        currentGroup = parsedGrp.isEmpty ? "Generale" : parsedGrp
                     }
                 }
                 if let commaIdx = trimmed.lastIndex(of: ",") {
                     currentTitle = String(trimmed[trimmed.index(after: commaIdx)...]).trimmingCharacters(in: .whitespaces)
                 }
             } else if !trimmed.isEmpty && !trimmed.hasPrefix("#") {
+                if currentTitle.hasPrefix("---") || currentTitle.hasPrefix("===") || currentTitle.hasPrefix("***") {
+                    currentTitle = ""
+                    return
+                }
+
                 let lowUrl = trimmed.lowercased()
-                let lowGrp = currentGroup.lowercased()
+                let upGrp = currentGroup.uppercased()
+                let grpRange = NSRange(currentGroup.startIndex..<currentGroup.endIndex, in: currentGroup)
+                let titleRange = NSRange(currentTitle.startIndex..<currentTitle.endIndex, in: currentTitle)
+
+                let isSeriesGroup = seriesGroupRegex.firstMatch(in: currentGroup, range: grpRange) != nil
+                let isEpisodeTitle = episodeTitleRegex.firstMatch(in: currentTitle, range: titleRange) != nil
+
                 let kind: String
-                if lowUrl.contains("/series/") || lowGrp.contains("serie") || lowGrp.contains("tv show") || lowGrp.contains("stagion") {
+                if lowUrl.contains("/series/") || isSeriesGroup || isEpisodeTitle {
                     kind = MediaKind.series.rawValue
-                } else if lowUrl.contains("/movie/") || lowUrl.hasSuffix(".mp4") || lowUrl.hasSuffix(".mkv") || lowUrl.hasSuffix(".avi") || lowGrp.contains("vod") || lowGrp.contains("film") || lowGrp.contains("cinema") || lowGrp.contains("movie") {
+                } else if lowUrl.contains("/movie/")
+                    || upGrp.hasPrefix("[VOD]")
+                    || upGrp.hasPrefix("VOD ")
+                    || upGrp.hasPrefix("FILM ")
+                    || lowUrl.hasSuffix(".mp4")
+                    || lowUrl.hasSuffix(".mkv")
+                    || lowUrl.hasSuffix(".avi")
+                    || lowUrl.hasSuffix(".mov") {
                     kind = MediaKind.vod.rawValue
                 } else {
                     kind = MediaKind.live.rawValue
@@ -212,6 +296,7 @@ final class CatalogStore: ObservableObject {
                 if sqlite3_step(insertStmt) == SQLITE_DONE {
                     count += 1
                 }
+                currentTitle = ""
             }
         }
 
