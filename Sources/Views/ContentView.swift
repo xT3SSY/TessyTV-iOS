@@ -61,6 +61,7 @@ struct VLCVideoSurface: UIViewRepresentable {
     func makeUIView(context: Context) -> UIView {
         let view = UIView()
         view.backgroundColor = .black
+        view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         player.drawable = view
         return view
     }
@@ -85,7 +86,7 @@ struct ContentView: View {
     @State private var downloadBannerText: String?
 
     var body: some View {
-        ZStack(alignment: .bottom) {
+        ZStack {
             // Sfondo ambientale profondo stile Liquid Glass
             LinearGradient(
                 colors: [
@@ -110,80 +111,83 @@ struct ContentView: View {
                 .blur(radius: 80)
                 .offset(x: 130, y: 240)
 
+            // Contenuto principale
             if selectedTab == .settings {
                 SettingsTabView()
                     .environmentObject(store)
                     .environmentObject(downloader)
-                    .padding(.bottom, 86)
+                    .padding(.bottom, 82)
             } else {
                 VStack(spacing: 10) {
-                    // Header superiore compatto
-                    HStack(spacing: 10) {
-                        Text("TessyTV")
-                            .font(.headline.weight(.bold))
-                            .foregroundColor(.white)
-
-                        if store.isSyncing {
-                            HStack(spacing: 6) {
-                                ProgressView().scaleEffect(0.7)
-                                Text("Sync...")
-                                    .font(.caption2.weight(.semibold))
-                            }
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
-                            .liquidGlassSurface(cornerRadius: 12)
-                        }
-
-                        Spacer()
-
-                        Button {
-                            showDownloads = true
-                        } label: {
-                            Label(
-                                downloader.activeCount > 0 ? "Download (\(downloader.activeCount))" : "Download",
-                                systemImage: "arrow.down.circle.fill"
-                            )
-                        }
-                        .buttonStyle(LiquidGlassChipStyle())
-                    }
-                    .padding(.horizontal, 14)
-                    .padding(.top, 6)
-
-                    if let banner = downloadBannerText {
-                        HStack(spacing: 8) {
-                            Image(systemName: "arrow.down.circle.fill")
-                                .foregroundColor(Color(red: 0.96, green: 0.65, blue: 0.25))
-                            Text(banner)
-                                .font(.caption.weight(.medium))
+                    if !isFullScreen {
+                        // Header superiore compatto
+                        HStack(spacing: 10) {
+                            Text("TessyTV")
+                                .font(.headline.weight(.bold))
                                 .foregroundColor(.white)
+
+                            if store.isSyncing {
+                                HStack(spacing: 6) {
+                                    ProgressView().scaleEffect(0.7)
+                                    Text("Sync...")
+                                        .font(.caption2.weight(.semibold))
+                                }
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .liquidGlassSurface(cornerRadius: 12)
+                            }
+
                             Spacer()
+
+                            Button {
+                                showDownloads = true
+                            } label: {
+                                Label(
+                                    downloader.activeCount > 0 ? "Download (\(downloader.activeCount))" : "Download",
+                                    systemImage: "arrow.down.circle.fill"
+                                )
+                            }
+                            .buttonStyle(LiquidGlassChipStyle())
                         }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 7)
-                        .liquidGlassSurface(cornerRadius: 12)
-                        .padding(.horizontal, 12)
+                        .padding(.horizontal, 14)
+                        .padding(.top, 6)
+
+                        if let banner = downloadBannerText {
+                            HStack(spacing: 8) {
+                                Image(systemName: "arrow.down.circle.fill")
+                                    .foregroundColor(Color(red: 0.96, green: 0.65, blue: 0.25))
+                                Text(banner)
+                                    .font(.caption.weight(.medium))
+                                    .foregroundColor(.white)
+                                Spacer()
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 7)
+                            .liquidGlassSurface(cornerRadius: 12)
+                            .padding(.horizontal, 12)
+                        }
                     }
 
-                    // Schermo Riproduzione arrotondato con motore MobileVLCKit (supporto Live .ts e .m3u8)
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    // Superficie Video UNICA e persistente (evita lo schermo nero quando si passa a FullScreen)
+                    ZStack(alignment: .topTrailing) {
+                        RoundedRectangle(cornerRadius: isFullScreen ? 0 : 16, style: .continuous)
                             .fill(Color.black)
                             .overlay(
-                                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                RoundedRectangle(cornerRadius: isFullScreen ? 0 : 16, style: .continuous)
                                     .stroke(
                                         LinearGradient(
-                                            colors: [Color.white.opacity(0.42), Color.white.opacity(0.10), Color.white.opacity(0.24)],
+                                            colors: [Color.white.opacity(isFullScreen ? 0 : 0.42), Color.white.opacity(isFullScreen ? 0 : 0.10), Color.white.opacity(isFullScreen ? 0 : 0.24)],
                                             startPoint: .topLeading,
                                             endPoint: .bottomTrailing
                                         ),
-                                        lineWidth: 1
+                                        lineWidth: isFullScreen ? 0 : 1
                                     )
                             )
-                            .shadow(color: Color.black.opacity(0.45), radius: 12, x: 0, y: 6)
+                            .shadow(color: Color.black.opacity(isFullScreen ? 0 : 0.45), radius: 12, x: 0, y: 6)
 
                         if currentItem != nil {
                             VLCVideoSurface(player: vlc.mediaPlayer)
-                                .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+                                .clipShape(RoundedRectangle(cornerRadius: isFullScreen ? 0 : 15, style: .continuous))
                         } else {
                             VStack(spacing: 6) {
                                 Image(systemName: "play.tv")
@@ -193,202 +197,241 @@ struct ContentView: View {
                                     .font(.caption)
                                     .foregroundColor(.white.opacity(0.55))
                             }
-                        }
-                    }
-                    .frame(height: 210)
-                    .padding(.horizontal, 12)
-
-                    // Pillola Controlli Player Liquid Glass
-                    HStack(spacing: 10) {
-                        Button {
-                            vlc.togglePlayPause()
-                        } label: {
-                            Image(systemName: vlc.isPlaying ? "pause.fill" : "play.fill")
-                                .frame(width: 34, height: 30)
-                                .background(
-                                    LinearGradient(
-                                        colors: [Color(red: 0.96, green: 0.65, blue: 0.25), Color.orange],
-                                        startPoint: .topLeading,
-                                        endPoint: .bottomTrailing
-                                    )
-                                )
-                                .foregroundColor(.black)
-                                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
                         }
 
-                        Button("-15s") { vlc.jump(seconds: -15) }
-                            .buttonStyle(LiquidGlassPillButtonStyle())
-
-                        Button("+15s") { vlc.jump(seconds: 15) }
-                            .buttonStyle(LiquidGlassPillButtonStyle())
-
-                        Button {
-                            vlc.stop()
-                            currentItem = nil
-                        } label: {
-                            Image(systemName: "stop.fill")
-                        }
-                        .buttonStyle(LiquidGlassPillButtonStyle())
-
-                        Spacer()
-
-                        if let item = currentItem, item.kind != .live {
-                            Button {
-                                downloader.enqueue(title: item.title, urlString: item.url)
-                                downloadBannerText = "Aggiunto ai download: \(item.title)"
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
-                                    downloadBannerText = nil
-                                }
-                            } label: {
-                                Image(systemName: "arrow.down.to.line")
-                            }
-                            .buttonStyle(LiquidGlassPillButtonStyle())
-                        }
-
-                        Button {
-                            isFullScreen = true
-                        } label: {
-                            Image(systemName: "arrow.up.left.and.arrow.down.right")
-                        }
-                        .buttonStyle(LiquidGlassPillButtonStyle())
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .liquidGlassSurface(cornerRadius: 15)
-                    .padding(.horizontal, 12)
-
-                    // Barra di ricerca adattiva alla sezione attiva
-                    HStack(spacing: 8) {
-                        HStack(spacing: 6) {
-                            Image(systemName: "magnifyingglass")
-                                .foregroundColor(.white.opacity(0.5))
-                                .font(.caption)
-                            TextField("Cerca in \(selectedTab.title)...", text: $store.searchQuery)
-                                .textFieldStyle(.plain)
-                                .foregroundColor(.white)
-                                .onSubmit { store.performSearch() }
-                            if !store.searchQuery.isEmpty {
-                                Button {
-                                    store.searchQuery = ""
-                                    store.performSearch()
-                                } label: {
-                                    Image(systemName: "xmark.circle.fill")
-                                        .foregroundColor(.white.opacity(0.45))
-                                }
-                            }
-                        }
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 8)
-                        .liquidGlassSurface(cornerRadius: 11)
-
-                        Button("Invio") { store.performSearch() }
-                            .buttonStyle(LiquidGlassPillButtonStyle())
-                    }
-                    .padding(.horizontal, 12)
-
-                    // Contenuto Catalogo (Home evidenza o Liste per Channels / Movies / Series)
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 6) {
-                            if !store.searchQuery.trimmingCharacters(in: .whitespaces).isEmpty {
-                                ForEach(store.items) { item in
-                                    channelRow(item)
-                                }
-                            } else if selectedTab == .home {
-                                if !store.recentItems.isEmpty {
-                                    Text("Canali Live in evidenza")
-                                        .font(.caption.weight(.bold))
-                                        .foregroundColor(Color(red: 0.96, green: 0.65, blue: 0.25))
-                                        .padding(.bottom, 2)
-
-                                    ForEach(store.recentItems) { item in
-                                        channelRow(item)
-                                    }
-                                } else {
-                                    VStack(spacing: 8) {
-                                        Text("Nessuna lista caricata")
-                                            .font(.subheadline.weight(.semibold))
-                                            .foregroundColor(.white.opacity(0.85))
-                                        Text("Vai nella scheda Settings in basso a destra per inserire il tuo link M3U.")
-                                            .font(.caption)
-                                            .foregroundColor(.white.opacity(0.55))
-                                            .multilineTextAlignment(.center)
-                                    }
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 28)
-                                }
-                            } else {
-                                ForEach(store.groups, id: \.self) { grp in
-                                    DisclosureGroup(
-                                        isExpanded: Binding(
-                                            get: { expandedGroup == grp },
-                                            set: { expandedGroup = $0 ? grp : nil }
-                                        )
-                                    ) {
-                                        ForEach(store.itemsForGroup(grp)) { item in
-                                            channelRow(item)
-                                                .padding(.leading, 12)
+                        if isFullScreen {
+                            VStack {
+                                HStack {
+                                    Spacer()
+                                    Button {
+                                        withAnimation(.easeInOut(duration: 0.22)) {
+                                            isFullScreen = false
                                         }
                                     } label: {
-                                        Text(grp)
-                                            .font(.subheadline.weight(.medium))
-                                            .foregroundColor(.white.opacity(0.92))
-                                            .padding(.vertical, 4)
+                                        Image(systemName: "xmark.circle.fill")
+                                            .font(.system(size: 30))
+                                            .foregroundColor(.white.opacity(0.9))
+                                            .shadow(color: .black.opacity(0.6), radius: 6)
+                                            .padding(.top, 16)
+                                            .padding(.trailing, 18)
                                     }
-                                    .tint(Color(red: 0.96, green: 0.65, blue: 0.25))
-                                    .contextMenu {
-                                        Button("Sposta categoria in Channels") { store.moveGroup(grp, to: .live) }
-                                        Button("Sposta categoria in Movies") { store.moveGroup(grp, to: .vod) }
-                                        Button("Sposta categoria in Series") { store.moveGroup(grp, to: .series) }
-                                        Divider()
-                                        Button("Rimuovi intera categoria", role: .destructive) { store.deleteGroup(grp) }
+                                }
+                                Spacer()
+                                HStack(spacing: 14) {
+                                    Button {
+                                        vlc.togglePlayPause()
+                                    } label: {
+                                        Image(systemName: vlc.isPlaying ? "pause.fill" : "play.fill")
+                                            .font(.headline)
+                                            .foregroundColor(.white)
+                                            .padding(10)
+                                    }
+                                    Button("-15s") { vlc.jump(seconds: -15) }
+                                        .font(.caption.weight(.bold))
+                                        .foregroundColor(.white)
+                                    Button("+15s") { vlc.jump(seconds: 15) }
+                                        .font(.caption.weight(.bold))
+                                        .foregroundColor(.white)
+                                }
+                                .padding(.horizontal, 18)
+                                .padding(.vertical, 8)
+                                .liquidGlassSurface(cornerRadius: 20)
+                                .padding(.bottom, 26)
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: isFullScreen ? .infinity : 210)
+                    .padding(.horizontal, isFullScreen ? 0 : 12)
+                    .ignoresSafeArea(isFullScreen ? .all : [], edges: .all)
+
+                    if !isFullScreen {
+                        // Pillola Controlli Player Liquid Glass
+                        HStack(spacing: 10) {
+                            Button {
+                                vlc.togglePlayPause()
+                            } label: {
+                                Image(systemName: vlc.isPlaying ? "pause.fill" : "play.fill")
+                                    .frame(width: 34, height: 30)
+                                    .background(
+                                        LinearGradient(
+                                            colors: [Color(red: 0.96, green: 0.65, blue: 0.25), Color.orange],
+                                            startPoint: .topLeading,
+                                            endPoint: .bottomTrailing
+                                        )
+                                    )
+                                    .foregroundColor(.black)
+                                    .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                            }
+
+                            Button("-15s") { vlc.jump(seconds: -15) }
+                                .buttonStyle(LiquidGlassPillButtonStyle())
+
+                            Button("+15s") { vlc.jump(seconds: 15) }
+                                .buttonStyle(LiquidGlassPillButtonStyle())
+
+                            Button {
+                                vlc.stop()
+                                currentItem = nil
+                            } label: {
+                                Image(systemName: "stop.fill")
+                            }
+                            .buttonStyle(LiquidGlassPillButtonStyle())
+
+                            Spacer()
+
+                            if let item = currentItem, item.kind != .live {
+                                Button {
+                                    downloader.enqueue(title: item.title, urlString: item.url)
+                                    downloadBannerText = "Aggiunto ai download: \(item.title)"
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                                        downloadBannerText = nil
+                                    }
+                                } label: {
+                                    Image(systemName: "arrow.down.to.line")
+                                }
+                                .buttonStyle(LiquidGlassPillButtonStyle())
+                            }
+
+                            Button {
+                                withAnimation(.easeInOut(duration: 0.22)) {
+                                    isFullScreen = true
+                                }
+                            } label: {
+                                Image(systemName: "arrow.up.left.and.arrow.down.right")
+                            }
+                            .buttonStyle(LiquidGlassPillButtonStyle())
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .liquidGlassSurface(cornerRadius: 15)
+                        .padding(.horizontal, 12)
+
+                        // Barra di ricerca adattiva alla sezione attiva
+                        HStack(spacing: 8) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "magnifyingglass")
+                                    .foregroundColor(.white.opacity(0.5))
+                                    .font(.caption)
+                                TextField("Cerca in \(selectedTab.title)...", text: $store.searchQuery)
+                                    .textFieldStyle(.plain)
+                                    .foregroundColor(.white)
+                                    .onSubmit { store.performSearch() }
+                                if !store.searchQuery.isEmpty {
+                                    Button {
+                                        store.searchQuery = ""
+                                        store.performSearch()
+                                    } label: {
+                                        Image(systemName: "xmark.circle.fill")
+                                            .foregroundColor(.white.opacity(0.45))
                                     }
                                 }
                             }
-                        }
-                        .padding(10)
-                    }
-                    .liquidGlassSurface(cornerRadius: 14)
-                    .padding(.horizontal, 12)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
+                            .liquidGlassSurface(cornerRadius: 11)
 
-                    // Status bar sopra la tab bar flottante
-                    HStack {
-                        Text(store.statusText)
-                            .font(.caption2)
-                            .foregroundColor(.white.opacity(0.55))
-                        Spacer()
+                            Button("Invio") { store.performSearch() }
+                                .buttonStyle(LiquidGlassPillButtonStyle())
+                        }
+                        .padding(.horizontal, 12)
+
+                        // Contenuto Catalogo (Home evidenza o Liste per Channels / Movies / Series)
+                        ScrollView {
+                            LazyVStack(alignment: .leading, spacing: 6) {
+                                if !store.searchQuery.trimmingCharacters(in: .whitespaces).isEmpty {
+                                    ForEach(store.items) { item in
+                                        channelRow(item)
+                                    }
+                                } else if selectedTab == .home {
+                                    if !store.recentItems.isEmpty {
+                                        Text("Canali Live in evidenza")
+                                            .font(.caption.weight(.bold))
+                                            .foregroundColor(Color(red: 0.96, green: 0.65, blue: 0.25))
+                                            .padding(.bottom, 2)
+
+                                        ForEach(store.recentItems) { item in
+                                            channelRow(item)
+                                        }
+                                    } else {
+                                        VStack(spacing: 8) {
+                                            Text("Nessuna lista caricata")
+                                                .font(.subheadline.weight(.semibold))
+                                                .foregroundColor(.white.opacity(0.85))
+                                            Text("Vai nella scheda Settings in basso a destra per inserire il tuo link M3U.")
+                                                .font(.caption)
+                                                .foregroundColor(.white.opacity(0.55))
+                                                .multilineTextAlignment(.center)
+                                        }
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 28)
+                                    }
+                                } else {
+                                    ForEach(store.groups, id: \.self) { grp in
+                                        DisclosureGroup(
+                                            isExpanded: Binding(
+                                                get: { expandedGroup == grp },
+                                                set: { expandedGroup = $0 ? grp : nil }
+                                            )
+                                        ) {
+                                            ForEach(store.itemsForGroup(grp)) { item in
+                                                channelRow(item)
+                                                    .padding(.leading, 12)
+                                            }
+                                        } label: {
+                                            Text(grp)
+                                                .font(.subheadline.weight(.medium))
+                                                .foregroundColor(.white.opacity(0.92))
+                                                .padding(.vertical, 4)
+                                        }
+                                        .tint(Color(red: 0.96, green: 0.65, blue: 0.25))
+                                        .contextMenu {
+                                            Button("Sposta categoria in Channels") { store.moveGroup(grp, to: .live) }
+                                            Button("Sposta categoria in Movies") { store.moveGroup(grp, to: .vod) }
+                                            Button("Sposta categoria in Series") { store.moveGroup(grp, to: .series) }
+                                            Divider()
+                                            Button("Rimuovi intera categoria", role: .destructive) { store.deleteGroup(grp) }
+                                        }
+                                    }
+                                }
+                            }
+                            .padding(10)
+                        }
+                        .liquidGlassSurface(cornerRadius: 14)
+                        .padding(.horizontal, 12)
+
+                        // Status bar sopra la tab bar flottante
+                        HStack {
+                            Text(store.statusText)
+                                .font(.caption2)
+                                .foregroundColor(.white.opacity(0.55))
+                            Spacer()
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.bottom, 84)
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.bottom, 84)
                 }
             }
 
-            // Menu Flottante Liquid Glass (Home, Channels, Movies, Series, Settings)
-            LiquidGlassFloatingTabBar(selectedTab: $selectedTab)
-                .onChange(of: selectedTab) { newTab in
-                    expandedGroup = nil
-                    if newTab != .settings {
-                        store.selectedCategory = newTab.mediaKind
-                        store.onCategoryChanged()
-                    }
+            // Menu Flottante Liquid Glass bloccato in basso (ignorando la tastiera iOS)
+            if !isFullScreen {
+                VStack {
+                    Spacer()
+                    LiquidGlassFloatingTabBar(selectedTab: $selectedTab)
+                        .onChange(of: selectedTab) { newTab in
+                            expandedGroup = nil
+                            if newTab != .settings {
+                                store.selectedCategory = newTab.mediaKind
+                                store.onCategoryChanged()
+                            }
+                        }
                 }
+                .ignoresSafeArea(.keyboard, edges: .bottom)
+            }
         }
         .sheet(isPresented: $showDownloads) {
             DownloadsSheetView()
                 .environmentObject(downloader)
-        }
-        .fullScreenCover(isPresented: $isFullScreen) {
-            ZStack(alignment: .topTrailing) {
-                Color.black.ignoresSafeArea()
-                VLCVideoSurface(player: vlc.mediaPlayer).ignoresSafeArea()
-                Button {
-                    isFullScreen = false
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.title)
-                        .foregroundColor(.white.opacity(0.85))
-                        .padding()
-                }
-            }
         }
     }
 
@@ -531,6 +574,7 @@ struct SettingsTabView: View {
                         .autocapitalization(.none)
 
                     Button {
+                        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
                         Task {
                             await store.importFromURL(urlString: urlInput)
                         }
@@ -576,6 +620,7 @@ struct SettingsTabView: View {
             }
             .padding(.horizontal, 14)
         }
+        .scrollDismissesKeyboard(.interactively)
     }
 }
 
