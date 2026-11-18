@@ -15,7 +15,9 @@ jobs:
         run: brew install xcodegen
 
       - name: Generate Xcode Project
-        run: xcodegen generate
+        run: |
+          xcodegen generate
+          xcodebuild -resolvePackageDependencies -project TessyTV.xcodeproj -scheme TessyTV
           xcodebuild -resolvePackageDependencies -project TessyTV.xcodeproj -scheme TessyTV
 
       - name: Build Unsigned IPA
@@ -41,5 +43,6 @@ jobs:
         with:
           name: TessyTV-iOS-IPA
           path: TessyTV.ipa
+
 
 
