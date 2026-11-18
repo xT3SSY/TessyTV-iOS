@@ -1,57 +1,235 @@
 ﻿import SwiftUI
+import AVKit
 import AVFoundation
 import UIKit
 import MobileVLCKit
 
-final class VLCPlayerController: ObservableObject {
-    let mediaPlayer = VLCMediaPlayer()
+// Controller unificato: usa AVPlayerViewController nativo iOS (Liquid Glass ufficiale) quando compatibile
+// e MobileVLCKit per i flussi Live MPEG-TS (.ts) grezzi con HUD Liquid Glass completo
+final class HybridPlayerController: ObservableObject {
+    let vlcPlayer = VLCMediaPlayer()
+    @Published var avPlayer: AVPlayer?
+    @Published var useNativeAVPlayer: Bool = false
     @Published var isPlaying: Bool = false
     @Published var currentTitle: String = ""
+    @Published var isLiveStream: Bool = false
 
-    func play(urlString: String, title: String) {
-        let cleaned = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let url = URL(string: cleaned) else { return }
+    @Published var currentTimeSec: Double = 0
+    @Published var durationSec: Double = 0
+    @Published var isSeeking: Bool = false
+
+    @Published var audioTracks: [(index: Int32, name: String)] = []
+    @Published var subtitleTracks: [(index: Int32, name: String)] = []
+    @Published var currentAudioIndex: Int32 = -1
+    @Published var currentSubIndex: Int32 = -1
+    @Published var isAspectFilled: Bool = false
+
+    private var timer: Timer?
+
+    init() {
+        startTelemetryTimer()
+    }
+
+    deinit {
+        timer?.invalidate()
+    }
+
+    private func startTelemetryTimer() {
+        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            if self.useNativeAVPlayer, let av = self.avPlayer {
+                self.isPlaying = (av.rate > 0 && av.error == nil)
+                if !self.isSeeking {
+                    let cur = CMTimeGetSeconds(av.currentTime())
+                    if cur.isFinite && cur >= 0 { self.currentTimeSec = cur }
+                    if let durItem = av.currentItem?.duration {
+                        let d = CMTimeGetSeconds(durItem)
+                        if d.isFinite && d > 0 { self.durationSec = d }
+                    }
+                }
+            } else {
+                self.isPlaying = self.vlcPlayer.isPlaying
+                if !self.isSeeking {
+                    let curMs = Double(self.vlcPlayer.time.intValue)
+                    if curMs >= 0 { self.currentTimeSec = curMs / 1000.0 }
+                    if let mediaLen = self.vlcPlayer.media?.length.intValue, mediaLen > 0 {
+                        self.durationSec = Double(mediaLen) / 1000.0
+                    }
+                }
+                self.refreshVLCTracksIfNeeded()
+            }
+        }
+    }
+
+    private func refreshVLCTracksIfNeeded() {
+        if let names = vlcPlayer.audioTrackNames as? [String],
+           let indexes = vlcPlayer.audioTrackIndexes as? [NSNumber],
+           names.count == indexes.count {
+            var list: [(Int32, String)] = []
+            for i in 0..<names.count {
+                list.append((indexes[i].int32Value, names[i]))
+            }
+            if list.count != audioTracks.count {
+                audioTracks = list
+                currentAudioIndex = vlcPlayer.currentAudioTrackIndex
+            }
+        }
+        if let sNames = vlcPlayer.videoSubTitlesNames as? [String],
+           let sIndexes = vlcPlayer.videoSubTitlesIndexes as? [NSNumber],
+           sNames.count == sIndexes.count {
+            var sList: [(Int32, String)] = []
+            for i in 0..<sNames.count {
+                sList.append((sIndexes[i].int32Value, sNames[i]))
+            }
+            if sList.count != subtitleTracks.count {
+                subtitleTracks = sList
+                currentSubIndex = vlcPlayer.currentVideoSubTitleIndex
+            }
+        }
+    }
+
+    func play(item: MediaItem) {
+        let cleaned = item.url.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let rawURL = URL(string: cleaned) else { return }
 
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback, options: [])
         try? AVAudioSession.sharedInstance().setActive(true)
 
-        mediaPlayer.stop()
-        let media = VLCMedia(url: url)
-        media.addOptions([
-            "network-caching": 1500,
-            "live-caching": 1500,
-            "clock-jitter": 0,
-            "clock-synchro": 0,
-            "http-user-agent": "VLC/3.0.20 LibVLC/3.0.20",
-            "http-reconnect": true
-        ])
-        mediaPlayer.media = media
-        mediaPlayer.play()
-        currentTitle = title
-        isPlaying = true
-    }
+        stopAll()
+        currentTitle = item.title
+        isLiveStream = (item.kind == .live)
+        currentTimeSec = 0
+        durationSec = 0
+        audioTracks = []
+        subtitleTracks = []
 
-    func togglePlayPause() {
-        if mediaPlayer.isPlaying {
-            mediaPlayer.pause()
-            isPlaying = false
+        let low = cleaned.lowercased()
+        // Usa AVPlayer nativo (con UI Liquid Glass di sistema iOS 27) per HLS (.m3u8) e file MP4/MOV nativi
+        let supportsNativeAV = low.contains(".m3u8") || low.hasSuffix(".mp4") || low.hasSuffix(".mov") || low.hasSuffix(".m4v")
+
+        if supportsNativeAV {
+            useNativeAVPlayer = true
+            let headers = ["User-Agent": "VLC/3.0.20 LibVLC/3.0.20"]
+            let asset = AVURLAsset(url: rawURL, options: ["AVURLAssetHTTPHeaderFieldsKey": headers])
+            let pItem = AVPlayerItem(asset: asset)
+            let player = AVPlayer(playerItem: pItem)
+            player.allowsExternalPlayback = true
+            self.avPlayer = player
+            player.play()
+            isPlaying = true
         } else {
-            mediaPlayer.play()
+            // Per flussi Live MPEG-TS (.ts) o MKV/AVI usa MobileVLCKit con HUD Liquid Glass iOS 27
+            useNativeAVPlayer = false
+            let media = VLCMedia(url: rawURL)
+            media.addOptions([
+                "network-caching": 1500,
+                "live-caching": 1500,
+                "clock-jitter": 0,
+                "clock-synchro": 0,
+                "http-user-agent": "VLC/3.0.20 LibVLC/3.0.20",
+                "http-reconnect": true
+            ])
+            vlcPlayer.media = media
+            vlcPlayer.play()
             isPlaying = true
         }
     }
 
-    func jump(seconds: Int32) {
-        if seconds < 0 {
-            mediaPlayer.jumpBackward(abs(seconds))
+    func togglePlayPause() {
+        if useNativeAVPlayer, let av = avPlayer {
+            if av.rate > 0 {
+                av.pause()
+                isPlaying = false
+            } else {
+                av.play()
+                isPlaying = true
+            }
         } else {
-            mediaPlayer.jumpForward(seconds)
+            if vlcPlayer.isPlaying {
+                vlcPlayer.pause()
+                isPlaying = false
+            } else {
+                vlcPlayer.play()
+                isPlaying = true
+            }
         }
     }
 
-    func stop() {
-        mediaPlayer.stop()
+    func jump(seconds: Double) {
+        if useNativeAVPlayer, let av = avPlayer {
+            let cur = CMTimeGetSeconds(av.currentTime())
+            let target = CMTime(seconds: max(0, cur + seconds), preferredTimescale: 600)
+            av.seek(to: target)
+        } else {
+            if seconds < 0 {
+                vlcPlayer.jumpBackward(Int32(abs(seconds)))
+            } else {
+                vlcPlayer.jumpForward(Int32(seconds))
+            }
+        }
+    }
+
+    func seek(toSeconds: Double) {
+        if useNativeAVPlayer, let av = avPlayer {
+            let target = CMTime(seconds: max(0, toSeconds), preferredTimescale: 600)
+            av.seek(to: target)
+        } else if durationSec > 0 {
+            let pos = Float(min(max(toSeconds / durationSec, 0), 1))
+            vlcPlayer.position = pos
+        }
+    }
+
+    func selectAudioTrack(_ idx: Int32) {
+        vlcPlayer.currentAudioTrackIndex = idx
+        currentAudioIndex = idx
+    }
+
+    func selectSubtitleTrack(_ idx: Int32) {
+        vlcPlayer.currentVideoSubTitleIndex = idx
+        currentSubIndex = idx
+    }
+
+    func toggleAspectFill() {
+        isAspectFilled.toggle()
+        if isAspectFilled {
+            let screen = UIScreen.main.bounds
+            let ratio = "\(Int(screen.width)):\(Int(screen.height))"
+            vlcPlayer.videoAspectRatio = UnsafeMutablePointer<Int8>(mutating: (ratio as NSString).utf8String)
+        } else {
+            vlcPlayer.videoAspectRatio = nil
+        }
+    }
+
+    func stopAll() {
+        avPlayer?.pause()
+        avPlayer = nil
+        vlcPlayer.stop()
         isPlaying = false
+    }
+}
+
+// Wrapper ufficiale AVPlayerViewController di iOS (rende il player nativo iOS 27 con Liquid Glass, AirPlay, PiP e X di sistema)
+struct NativeIOSPlayerView: UIViewControllerRepresentable {
+    let player: AVPlayer
+    let showsPlaybackControls: Bool
+    var onDismissFullscreen: (() -> Void)? = nil
+
+    func makeUIViewController(context: Context) -> AVPlayerViewController {
+        let vc = AVPlayerViewController()
+        vc.player = player
+        vc.showsPlaybackControls = showsPlaybackControls
+        vc.allowsPictureInPicturePlayback = true
+        vc.canStartPictureInPictureAutomaticallyFromInline = true
+        vc.videoGravity = .resizeAspect
+        vc.view.backgroundColor = .black
+        return vc
+    }
+
+    func updateUIViewController(_ uiViewController: AVPlayerViewController, context: Context) {
+        if uiViewController.player !== player {
+            uiViewController.player = player
+        }
+        uiViewController.showsPlaybackControls = showsPlaybackControls
     }
 }
 
@@ -73,10 +251,282 @@ struct VLCVideoSurface: UIViewRepresentable {
     }
 }
 
+// HUD Fullscreen Liquid Glass stile iOS 27 (rispetta Safe Area, X circolare pulita, scrubber, audio/sub)
+struct LiquidGlassFullscreenHUD: View {
+    @ObservedObject var controller: HybridPlayerController
+    let onClose: () -> Void
+    @State private var showControls: Bool = true
+    @State private var hideTask: Task<Void, Never>?
+
+    var body: some View {
+        ZStack {
+            // Area trasparente per mostrare/nascondere i controlli al tap
+            Color.black.opacity(0.001)
+                .ignoresSafeArea()
+                .onTapGesture {
+                    withAnimation(.easeInOut(duration: 0.22)) {
+                        showControls.toggle()
+                    }
+                    scheduleAutoHide()
+                }
+
+            if showControls {
+                VStack {
+                    // Barra superiore ancorata sotto la Status Bar / Dynamic Island (Safe Area rispettata)
+                    HStack(spacing: 12) {
+                        Button {
+                            onClose()
+                        } label: {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 16, weight: .bold))
+                                .foregroundColor(.white)
+                                .frame(width: 40, height: 40)
+                                .background(
+                                    Circle()
+                                        .fill(.ultraThinMaterial)
+                                        .overlay(Circle().fill(Color.white.opacity(0.08)))
+                                        .overlay(
+                                            Circle().strokeBorder(
+                                                LinearGradient(
+                                                    colors: [Color.white.opacity(0.45), Color.white.opacity(0.12)],
+                                                    startPoint: .topLeading,
+                                                    endPoint: .bottomTrailing
+                                                ),
+                                                lineWidth: 1
+                                            )
+                                        )
+                                )
+                                .shadow(color: .black.opacity(0.4), radius: 8, x: 0, y: 4)
+                        }
+                        .buttonStyle(.plain)
+
+                        Text(controller.currentTitle)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundColor(.white)
+                            .lineLimit(1)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 9)
+                            .background(
+                                Capsule()
+                                    .fill(.ultraThinMaterial)
+                                    .overlay(Capsule().strokeBorder(Color.white.opacity(0.24), lineWidth: 0.8))
+                            )
+
+                        Spacer()
+
+                        // Menu tracce Audio e Sottotitoli in stile Liquid Glass
+                        if !controller.audioTracks.isEmpty || !controller.subtitleTracks.isEmpty {
+                            Menu {
+                                if !controller.audioTracks.isEmpty {
+                                    Section("Audio") {
+                                        ForEach(controller.audioTracks, id: \.index) { tr in
+                                            Button {
+                                                controller.selectAudioTrack(tr.index)
+                                            } label: {
+                                                if tr.index == controller.currentAudioIndex {
+                                                    Label(tr.name, systemImage: "checkmark")
+                                                } else {
+                                                    Text(tr.name)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if !controller.subtitleTracks.isEmpty {
+                                    Section("Sottotitoli") {
+                                        ForEach(controller.subtitleTracks, id: \.index) { sub in
+                                            Button {
+                                                controller.selectSubtitleTrack(sub.index)
+                                            } label: {
+                                                if sub.index == controller.currentSubIndex {
+                                                    Label(sub.name, systemImage: "checkmark")
+                                                } else {
+                                                    Text(sub.name)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            } label: {
+                                Image(systemName: "captions.bubble")
+                                    .font(.system(size: 16, weight: .semibold))
+                                    .foregroundColor(.white)
+                                    .frame(width: 40, height: 40)
+                                    .background(
+                                        Circle()
+                                            .fill(.ultraThinMaterial)
+                                            .overlay(Circle().strokeBorder(Color.white.opacity(0.28), lineWidth: 0.9))
+                                    )
+                            }
+                        }
+
+                        // Pulsante Adatta / Riempi schermo
+                        Button {
+                            controller.toggleAspectFill()
+                            scheduleAutoHide()
+                        } label: {
+                            Image(systemName: controller.isAspectFilled ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
+                                .font(.system(size: 15, weight: .semibold))
+                                .foregroundColor(.white)
+                                .frame(width: 40, height: 40)
+                                .background(
+                                    Circle()
+                                        .fill(.ultraThinMaterial)
+                                        .overlay(Circle().strokeBorder(Color.white.opacity(0.28), lineWidth: 0.9))
+                                )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+
+                    Spacer()
+
+                    // Dock inferiore Liquid Glass completo (Scrubber + Controlli traslucidi iOS 27)
+                    VStack(spacing: 12) {
+                        if controller.durationSec > 1 && !controller.isLiveStream {
+                            VStack(spacing: 4) {
+                                Slider(
+                                    value: Binding(
+                                        get: { controller.currentTimeSec },
+                                        set: { newVal in
+                                            controller.isSeeking = true
+                                            controller.currentTimeSec = newVal
+                                        }
+                                    ),
+                                    in: 0...max(controller.durationSec, 1),
+                                    onEditingChanged: { editing in
+                                        if !editing {
+                                            controller.seek(toSeconds: controller.currentTimeSec)
+                                            controller.isSeeking = false
+                                            scheduleAutoHide()
+                                        }
+                                    }
+                                )
+                                .tint(.white)
+
+                                HStack {
+                                    Text(formatTime(controller.currentTimeSec))
+                                    Spacer()
+                                    Text("-\(formatTime(max(0, controller.durationSec - controller.currentTimeSec)))")
+                                }
+                                .font(.caption2.monospacedDigit().weight(.medium))
+                                .foregroundColor(.white.opacity(0.8))
+                            }
+                        } else {
+                            HStack(spacing: 6) {
+                                Circle()
+                                    .fill(Color.red)
+                                    .frame(width: 8, height: 8)
+                                Text("LIVE")
+                                    .font(.caption2.weight(.bold))
+                                    .foregroundColor(.white.opacity(0.9))
+                                Spacer()
+                            }
+                        }
+
+                        HStack(spacing: 34) {
+                            Button {
+                                controller.jump(seconds: -15)
+                                scheduleAutoHide()
+                            } label: {
+                                Image(systemName: "gobackward.15")
+                                    .font(.system(size: 24, weight: .semibold))
+                                    .foregroundColor(.white)
+                            }
+                            .buttonStyle(.plain)
+
+                            Button {
+                                controller.togglePlayPause()
+                                scheduleAutoHide()
+                            } label: {
+                                Image(systemName: controller.isPlaying ? "pause.fill" : "play.fill")
+                                    .font(.system(size: 32, weight: .bold))
+                                    .foregroundColor(.white)
+                                    .frame(width: 56, height: 56)
+                                    .background(
+                                        Circle()
+                                            .fill(Color.white.opacity(0.16))
+                                            .overlay(Circle().strokeBorder(Color.white.opacity(0.32), lineWidth: 1))
+                                    )
+                            }
+                            .buttonStyle(.plain)
+
+                            Button {
+                                controller.jump(seconds: 15)
+                                scheduleAutoHide()
+                            } label: {
+                                Image(systemName: "goforward.15")
+                                    .font(.system(size: 24, weight: .semibold))
+                                    .foregroundColor(.white)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 16)
+                    .background(
+                        RoundedRectangle(cornerRadius: 26, style: .continuous)
+                            .fill(.ultraThinMaterial)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 26, style: .continuous)
+                                    .fill(Color.white.opacity(0.05))
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 26, style: .continuous)
+                                    .strokeBorder(
+                                        LinearGradient(
+                                            colors: [Color.white.opacity(0.42), Color.white.opacity(0.10), Color.white.opacity(0.24)],
+                                            startPoint: .topLeading,
+                                            endPoint: .bottomTrailing
+                                        ),
+                                        lineWidth: 1
+                                    )
+                            )
+                            .shadow(color: .black.opacity(0.45), radius: 18, x: 0, y: 10)
+                    )
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 14)
+                }
+                .transition(.opacity)
+            }
+        }
+        .onAppear {
+            scheduleAutoHide()
+        }
+    }
+
+    private func scheduleAutoHide() {
+        hideTask?.cancel()
+        hideTask = Task {
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            if !Task.isCancelled && !controller.isSeeking {
+                await MainActor.run {
+                    withAnimation(.easeInOut(duration: 0.25)) {
+                        showControls = false
+                    }
+                }
+            }
+        }
+    }
+
+    private func formatTime(_ sec: Double) -> String {
+        guard sec.isFinite && sec >= 0 else { return "00:00" }
+        let total = Int(sec)
+        let h = total / 3600
+        let m = (total % 3600) / 60
+        let s = total % 60
+        if h > 0 {
+            return String(format: "%d:%02d:%02d", h, m, s)
+        }
+        return String(format: "%02d:%02d", m, s)
+    }
+}
+
 struct ContentView: View {
     @EnvironmentObject var store: CatalogStore
     @EnvironmentObject var downloader: DownloadService
-    @StateObject private var vlc = VLCPlayerController()
+    @StateObject private var playerCtrl = HybridPlayerController()
 
     @State private var selectedTab: AppTab = .home
     @State private var currentItem: MediaItem?
@@ -111,8 +561,7 @@ struct ContentView: View {
                 .blur(radius: 80)
                 .offset(x: 130, y: 240)
 
-            // Contenuto principale
-            if selectedTab == .settings {
+            if selectedTab == .settings && !isFullScreen {
                 SettingsTabView()
                     .environmentObject(store)
                     .environmentObject(downloader)
@@ -168,8 +617,8 @@ struct ContentView: View {
                         }
                     }
 
-                    // Superficie Video UNICA e persistente (evita lo schermo nero quando si passa a FullScreen)
-                    ZStack(alignment: .topTrailing) {
+                    // Superficie Video Unica (Nativo iOS AVPlayerViewController per HLS/MP4 + VLCKit con HUD Liquid Glass iOS 27 per Live .ts)
+                    ZStack {
                         RoundedRectangle(cornerRadius: isFullScreen ? 0 : 16, style: .continuous)
                             .fill(Color.black)
                             .overlay(
@@ -186,8 +635,15 @@ struct ContentView: View {
                             .shadow(color: Color.black.opacity(isFullScreen ? 0 : 0.45), radius: 12, x: 0, y: 6)
 
                         if currentItem != nil {
-                            VLCVideoSurface(player: vlc.mediaPlayer)
-                                .clipShape(RoundedRectangle(cornerRadius: isFullScreen ? 0 : 15, style: .continuous))
+                            if playerCtrl.useNativeAVPlayer, let av = playerCtrl.avPlayer {
+                                NativeIOSPlayerView(player: av, showsPlaybackControls: isFullScreen)
+                                    .clipShape(RoundedRectangle(cornerRadius: isFullScreen ? 0 : 15, style: .continuous))
+                                    .ignoresSafeArea(isFullScreen ? .all : [], edges: .all)
+                            } else {
+                                VLCVideoSurface(player: playerCtrl.vlcPlayer)
+                                    .clipShape(RoundedRectangle(cornerRadius: isFullScreen ? 0 : 15, style: .continuous))
+                                    .ignoresSafeArea(isFullScreen ? .all : [], edges: .all)
+                            }
                         } else {
                             VStack(spacing: 6) {
                                 Image(systemName: "play.tv")
@@ -200,58 +656,53 @@ struct ContentView: View {
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                         }
 
+                        // In Fullscreen: se è attivo AVPlayerViewController nativo iOS 27, usa i controlli nativi Apple (tranne un pulsante X SafeArea in basso/angolo se serve);
+                        // se è attivo VLCKit (Live .ts), mostra l'HUD completo Liquid Glass iOS 27 dentro la Safe Area!
                         if isFullScreen {
-                            VStack {
-                                HStack {
-                                    Spacer()
-                                    Button {
-                                        withAnimation(.easeInOut(duration: 0.22)) {
-                                            isFullScreen = false
+                            if playerCtrl.useNativeAVPlayer {
+                                VStack {
+                                    HStack {
+                                        Button {
+                                            withAnimation(.easeInOut(duration: 0.22)) {
+                                                isFullScreen = false
+                                            }
+                                        } label: {
+                                            Image(systemName: "xmark")
+                                                .font(.system(size: 16, weight: .bold))
+                                                .foregroundColor(.white)
+                                                .frame(width: 38, height: 38)
+                                                .background(
+                                                    Circle()
+                                                        .fill(.ultraThinMaterial)
+                                                        .overlay(Circle().strokeBorder(Color.white.opacity(0.35), lineWidth: 1))
+                                                )
                                         }
-                                    } label: {
-                                        Image(systemName: "xmark.circle.fill")
-                                            .font(.system(size: 30))
-                                            .foregroundColor(.white.opacity(0.9))
-                                            .shadow(color: .black.opacity(0.6), radius: 6)
-                                            .padding(.top, 16)
-                                            .padding(.trailing, 18)
+                                        .buttonStyle(.plain)
+                                        Spacer()
+                                    }
+                                    .padding(.horizontal, 16)
+                                    .padding(.top, 8)
+                                    Spacer()
+                                }
+                            } else {
+                                LiquidGlassFullscreenHUD(controller: playerCtrl) {
+                                    withAnimation(.easeInOut(duration: 0.22)) {
+                                        isFullScreen = false
                                     }
                                 }
-                                Spacer()
-                                HStack(spacing: 14) {
-                                    Button {
-                                        vlc.togglePlayPause()
-                                    } label: {
-                                        Image(systemName: vlc.isPlaying ? "pause.fill" : "play.fill")
-                                            .font(.headline)
-                                            .foregroundColor(.white)
-                                            .padding(10)
-                                    }
-                                    Button("-15s") { vlc.jump(seconds: -15) }
-                                        .font(.caption.weight(.bold))
-                                        .foregroundColor(.white)
-                                    Button("+15s") { vlc.jump(seconds: 15) }
-                                        .font(.caption.weight(.bold))
-                                        .foregroundColor(.white)
-                                }
-                                .padding(.horizontal, 18)
-                                .padding(.vertical, 8)
-                                .liquidGlassSurface(cornerRadius: 20)
-                                .padding(.bottom, 26)
                             }
                         }
                     }
                     .frame(maxWidth: .infinity, maxHeight: isFullScreen ? .infinity : 210)
                     .padding(.horizontal, isFullScreen ? 0 : 12)
-                    .ignoresSafeArea(isFullScreen ? .all : [], edges: .all)
 
                     if !isFullScreen {
-                        // Pillola Controlli Player Liquid Glass
+                        // Pillola Controlli Player Liquid Glass (modalità finestra)
                         HStack(spacing: 10) {
                             Button {
-                                vlc.togglePlayPause()
+                                playerCtrl.togglePlayPause()
                             } label: {
-                                Image(systemName: vlc.isPlaying ? "pause.fill" : "play.fill")
+                                Image(systemName: playerCtrl.isPlaying ? "pause.fill" : "play.fill")
                                     .frame(width: 34, height: 30)
                                     .background(
                                         LinearGradient(
@@ -264,14 +715,14 @@ struct ContentView: View {
                                     .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                             }
 
-                            Button("-15s") { vlc.jump(seconds: -15) }
+                            Button("-15s") { playerCtrl.jump(seconds: -15) }
                                 .buttonStyle(LiquidGlassPillButtonStyle())
 
-                            Button("+15s") { vlc.jump(seconds: 15) }
+                            Button("+15s") { playerCtrl.jump(seconds: 15) }
                                 .buttonStyle(LiquidGlassPillButtonStyle())
 
                             Button {
-                                vlc.stop()
+                                playerCtrl.stopAll()
                                 currentItem = nil
                             } label: {
                                 Image(systemName: "stop.fill")
@@ -439,7 +890,7 @@ struct ContentView: View {
         HStack(spacing: 8) {
             Button {
                 currentItem = item
-                vlc.play(urlString: item.url, title: item.title)
+                playerCtrl.play(item: item)
                 store.statusText = "Riproduzione: \(item.title)"
             } label: {
                 HStack {
